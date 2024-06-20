@@ -568,7 +568,7 @@ static __global__ void flash_attn_combine_results(
     dst       +=                 D * gridDim.y*blockIdx.x;
 
     const int tid = threadIdx.x;
-    __builtin_assume(tid < D);
+    GGML_CUDA_ASSUME(tid < D);
 
     __shared__ float2 meta[parallel_blocks];
     if (tid < 2*parallel_blocks) {

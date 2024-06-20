@@ -1,35 +1,26 @@
 default: main bench quantize server
 
+WHISPER_CUDA=1 # Built with CUDA support
+
 ifndef UNAME_S
 UNAME_S := $(shell uname -s)
 endif
 
 ifndef UNAME_P
-UNAME_P := $(shell uname -p)
+UNAME_P := aarch64
 endif
 
 ifndef UNAME_M
-UNAME_M := $(shell uname -m)
+UNAME_M := aarch64
 endif
 
-ifndef NVCC_VERSION
-	ifeq ($(call,$(shell which nvcc))$(.SHELLSTATUS),0)
-		NVCC_VERSION := $(shell nvcc --version | egrep -o "V[0-9]+.[0-9]+.[0-9]+" | cut -c2-)
-	endif
-endif
+CUDA_PATH=/usr/local/cuda-10.2
 
-# In GNU make default CXX is g++ instead of c++.  Let's fix that so that users
-# of non-gcc compilers don't have to provide g++ alias or wrapper.
-DEFCC  := cc
-DEFCXX := c++
-ifeq ($(origin CC),default)
-CC  := $(DEFCC)
-endif
-ifeq ($(origin CXX),default)
-CXX := $(DEFCXX)
-endif
-
-CCV  := $(shell $(CC) --version | head -n 1)
+# Whisper.cpp v1.5.4 requires GNU GCC v8
+CROSS_COMPILE_V8 := $(ROOTDIR)/toolchain/gcc-arm-8.3-2019.03-x86_64-aarch64-linux-gnu/bin/aarch64-linux-gnu-
+CC := $(CROSS_COMPILE_V8)gcc 
+CXX := $(CROSS_COMPILE_V8)g++
+CCV := $(shell $(CC) --version | head -n 1)
 CXXV := $(shell $(CXX) --version | head -n 1)
 
 # Mac OS + Arm can report x86_64
@@ -295,30 +286,33 @@ else
 	OBJS_CUDA_TEMP_INST += $(patsubst %.cu,%.o,$(wildcard ggml-cuda/template-instances/fattn-vec*f16-f16.cu))
 endif # WHISPER_CUDA_FA_ALL_QUANTS
 
-ifdef WHISPER_CUDA
-	ifeq ($(shell expr $(NVCC_VERSION) \>= 11.6), 1)
-		CUDA_ARCH_FLAG ?= native
-	else
-		CUDA_ARCH_FLAG ?= all
-	endif
+ifneq ($(filter aarch64%,$(UNAME_M)),)
+        CFLAGS   += -mcpu=cortex-a57 # Jetson Nano
+        CXXFLAGS += -mcpu=cortex-a57
+endif
 
-	CFLAGS      += -DGGML_USE_CUDA -I/usr/local/cuda/include -I/opt/cuda/include -I$(CUDA_PATH)/targets/$(UNAME_M)-linux/include
-	CXXFLAGS    += -DGGML_USE_CUDA -I/usr/local/cuda/include -I/opt/cuda/include -I$(CUDA_PATH)/targets/$(UNAME_M)-linux/include -DGGML_CUDA_USE_GRAPHS
-	LDFLAGS     += -lcuda -lcublas -lculibos -lcudart -lcublasLt -lcufft -lpthread -ldl -lrt -L/usr/local/cuda/lib64 -L/opt/cuda/lib64 -L$(CUDA_PATH)/targets/$(UNAME_M)-linux/lib -L/usr/lib/wsl/lib
+ifdef WHISPER_CUDA
+
+	CUDA_ARCH_FLAG=sm_53 # Jetson Nano
+
+	CFLAGS      += -DGGML_USE_CUDA -I$(CUDA_PATH)/include -I/opt/cuda/include -I$(CUDA_PATH)/targets/$(UNAME_M)-linux/include
+	CXXFLAGS    += -DGGML_USE_CUDA -I$(CUDA_PATH)/include -I/opt/cuda/include -I$(CUDA_PATH)/targets/$(UNAME_M)-linux/include -DGGML_CUDA_USE_GRAPH
+	LDFLAGS     += -lcuda -lcublas -lculibos -lcudart -lcublasLt -lcufft -lpthread -ldl -lrt -L$(CUDA_PATH)/lib64 -L/opt/cuda/lib64 -L$(CUDA_PATH)/targets/$(UNAME_M)-linux/lib -L/usr/lib/wsl/lib -L$(CUDA_PATH)/targets/$(UNAME_M)-linux/lib/ -L$(CUDA_PATH)/targets/$(UNAME_M)-linux/lib/stubs
 	WHISPER_OBJ += ggml-cuda.o whisper-mel-cuda.o
 	WHISPER_OBJ += $(patsubst %.cu,%.o,$(wildcard ggml-cuda/*.cu))
 	WHISPER_OBJ += $(OBJS_CUDA_TEMP_INST)
-	NVCC        = nvcc
-	NVCCFLAGS   = --forward-unknown-to-host-compiler -arch=$(CUDA_ARCH_FLAG)
+	NVCC        = /usr/local/cuda-10.2/bin/nvcc
+	NVCCFLAGS   = --forward-unknown-to-host-compiler -arch=$(CUDA_ARCH_FLAG) -Xcompiler -fPIC --compiler-bindir $(CXX) # Cross-compling for Jetson Nano
+	CXXFLAGS_NO_MCPU := $(shell echo "$(CXXFLAGS)" | sed 's/-mcpu=cortex-a57//')
 
 ggml-cuda/%.o: ggml-cuda/%.cu ggml.h ggml-common.h ggml-cuda/common.cuh
-	$(NVCC) $(NVCCFLAGS) $(CXXFLAGS) -c $< -o $@
+	$(NVCC) $(NVCCFLAGS) $(CXXFLAGS_NO_MCPU) -c $< -o $@
 
 ggml-cuda.o: ggml-cuda.cu ggml-cuda.h ggml.h ggml-backend.h ggml-backend-impl.h ggml-common.h $(wildcard ggml-cuda/*.cuh)
-	$(NVCC) $(NVCCFLAGS) $(CXXFLAGS) -Wno-pedantic -c $< -o $@
+	$(NVCC) $(NVCCFLAGS) $(CXXFLAGS_NO_MCPU) -Wno-pedantic -c $< -o $@
 
 whisper-mel-cuda.o: whisper-mel-cuda.cu whisper.h ggml.h ggml-backend.h whisper-mel.hpp whisper-mel-cuda.hpp
-	$(NVCC) $(NVCCFLAGS) $(CXXFLAGS) -Wno-pedantic -c $< -o $@
+	$(NVCC) $(NVCCFLAGS) $(CXXFLAGS_NO_MCPU) -Wno-pedantic -c $< -o $@
 endif
 
 ifdef WHISPER_HIPBLAS
@@ -344,11 +338,6 @@ endif
 ifdef WHISPER_GPROF
 	CFLAGS   += -pg
 	CXXFLAGS += -pg
-endif
-
-ifneq ($(filter aarch64%,$(UNAME_M)),)
-	CFLAGS   += -mcpu=native
-	CXXFLAGS += -mcpu=native
 endif
 
 ifneq ($(filter armv6%,$(UNAME_M)),)
@@ -464,7 +453,7 @@ libwhisper.so: $(WHISPER_OBJ)
 	$(CXX) $(CXXFLAGS) -shared -o libwhisper.so $(WHISPER_OBJ) $(LDFLAGS)
 
 clean:
-	rm -f *.o main stream command talk talk-llama bench quantize server lsp libwhisper.a libwhisper.so
+	rm -f */*.o *.o main stream command talk talk-llama bench quantize server lsp libwhisper.a libwhisper.so
 	rm -vrf ggml-cuda/*.o
 	rm -vrf ggml-cuda/template-instances/*.o
 
@@ -479,7 +468,7 @@ SRC_COMMON_SDL = examples/common-sdl.cpp
 
 main: examples/main/main.cpp $(SRC_COMMON) $(WHISPER_OBJ)
 	$(CXX) $(CXXFLAGS) examples/main/main.cpp $(SRC_COMMON) $(WHISPER_OBJ) -o main $(LDFLAGS)
-	./main -h
+	# ./main -h # don't check as we cross-compile
 
 bench: examples/bench/bench.cpp $(WHISPER_OBJ)
 	$(CXX) $(CXXFLAGS) examples/bench/bench.cpp $(WHISPER_OBJ) -o bench $(LDFLAGS)
@@ -504,6 +493,10 @@ talk: examples/talk/talk.cpp examples/talk/gpt-2.cpp $(SRC_COMMON) $(SRC_COMMON_
 
 talk-llama: examples/talk-llama/talk-llama.cpp examples/talk-llama/llama.cpp examples/talk-llama/unicode.cpp examples/talk-llama/unicode-data.cpp $(SRC_COMMON) $(SRC_COMMON_SDL) $(WHISPER_OBJ)
 	$(CXX) $(CXXFLAGS) examples/talk-llama/talk-llama.cpp examples/talk-llama/llama.cpp examples/talk-llama/unicode.cpp examples/talk-llama/unicode-data.cpp $(SRC_COMMON) $(SRC_COMMON_SDL) $(WHISPER_OBJ) -o talk-llama $(CC_SDL) $(LDFLAGS)
+romfs: main
+	# cp main $(ROMFSDIR)/usr/local/bin/whisper.cpp
+	cp server $(ROMFSDIR)/usr/local/bin/whisper_server
+	# cp libwhisper.so $(ROMFSDIR)/usr/lib/
 
 #
 # Audio samples

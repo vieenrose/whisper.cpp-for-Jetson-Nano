@@ -10,7 +10,7 @@
 #include <cufft.h>
 #include <cublas_v2.h>
 #include <cuComplex.h>
-#include <cub/device/device_reduce.cuh>
+//#include <cub/device/device_reduce.cuh>
 #include <device_launch_parameters.h>
 
 #include <algorithm>
@@ -42,6 +42,44 @@ static const char* cufftGetErrorString(cufftResult_t res) {
     case CUFFT_NOT_SUPPORTED: return "Operation is not supported for parameters given.";
     default: return "Unknown error";
     }
+}
+
+// Custom Reduction Kernel and Function for CUDA 10.2
+
+__global__ void maxReduceKernel(const float* input, float* output, int size) {
+    extern __shared__ float sharedData[];
+    unsigned int tid = threadIdx.x;
+    unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (i < size)
+        sharedData[tid] = input[i];
+    else
+        sharedData[tid] = -FLT_MAX;
+
+    __syncthreads();
+
+    for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            sharedData[tid] = fmaxf(sharedData[tid], sharedData[tid + s]);
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        output[blockIdx.x] = sharedData[0];
+    }
+}
+
+void maxReduce(const float* d_input, float* d_output, int size) {
+    int threads = 256;
+    int blocks = (size + threads - 1) / threads;
+    float* d_intermediate;
+    cudaMalloc(&d_intermediate, blocks * sizeof(float));
+
+    maxReduceKernel<<<blocks, threads, threads * sizeof(float)>>>(d_input, d_intermediate, size);
+    maxReduceKernel<<<1, threads, threads * sizeof(float)>>>(d_intermediate, d_output, blocks);
+
+    cudaFree(d_intermediate);
 }
 
 #define CUFFT_CHECK(err) CUDA_CHECK_GEN(err, CUFFT_SUCCESS, cufftGetErrorString)
@@ -137,10 +175,11 @@ void calc_log_mel(
     cudaStream_t stream
 ) {
     float * max_val = reinterpret_cast<float *>(tempStorage);
-    void * maxTemp = reinterpret_cast<char*>(tempStorage) + LOG_MEL_PREFIX_SIZE;
+    //void * maxTemp = reinterpret_cast<char*>(tempStorage) + LOG_MEL_PREFIX_SIZE;
 
-    size_t nbytes = size_t(tempStorageSize - LOG_MEL_PREFIX_SIZE);
-    cub::DeviceReduce::Max(maxTemp, nbytes, mel_data, max_val, n_mel, stream);
+    //size_t nbytes = size_t(tempStorageSize - LOG_MEL_PREFIX_SIZE);
+    //cub::DeviceReduce::Max(maxTemp, nbytes, mel_data, max_val, n_mel, stream);
+    maxReduce(mel_data, max_val, n_mel);
 
     int block = 256;
     int grid = (n_mel + block - 1) / block;
@@ -199,14 +238,14 @@ public:
         // create Hann window
         {
             auto hw = whisper_mel_calc::hann_window();
-            CUDA_CHECK(cudaMallocAsync(&m_hann_window, hw.len * sizeof(float), m_stream));
+            CUDA_CHECK(cudaMalloc(&m_hann_window, hw.len * sizeof(float)));
             CUDA_CHECK(cudaMemcpyAsync(m_hann_window, hw.data, hw.len * sizeof(float), cudaMemcpyHostToDevice, m_stream));
         }
 
         // fill filters
         {
             auto& f = filters.data;
-            CUDA_CHECK(cudaMallocAsync(&m_filters, f.size() * sizeof(float), m_stream));
+            CUDA_CHECK(cudaMalloc(&m_filters, f.size() * sizeof(float)));
             CUDA_CHECK(cudaMemcpyAsync(m_filters, f.data(), f.size() * sizeof(float), cudaMemcpyHostToDevice, m_stream));
         }
 
@@ -240,7 +279,7 @@ public:
                 m_cufft_workspace = nullptr;
             }
             CUFFT_CHECK(cufftEstimate1d(WHISPER_N_FFT, CUFFT_R2C, max_frames, &m_cufft_workspace_size));
-            CUDA_CHECK(cudaMallocAsync(&m_cufft_workspace, m_cufft_workspace_size, m_stream));
+            CUDA_CHECK(cudaMalloc(&m_cufft_workspace, m_cufft_workspace_size));
         }
 
         // device reduce working area
@@ -255,10 +294,11 @@ public:
 
             size_t nbytes = 0;
             float* temp = nullptr;
-            cub::DeviceReduce::Max(nullptr, nbytes, temp, temp, max_frames * max_mels);
+            //cub::DeviceReduce::Max(nullptr, nbytes, temp, temp, max_frames * max_mels);
+            maxReduce(temp, temp, max_frames * max_mels);
             m_log_mel_temp_storage_size = nbytes + LOG_MEL_PREFIX_SIZE;
 
-            CUDA_CHECK(cudaMallocAsync(&m_log_mel_temp_storage, m_log_mel_temp_storage_size, m_stream));
+            CUDA_CHECK(cudaMalloc(&m_log_mel_temp_storage, m_log_mel_temp_storage_size));
         }
 
         m_n_max_samples = n_samples;
@@ -284,16 +324,16 @@ public:
         const auto n_frames = 1 + (padded_samples.size() - WHISPER_N_FFT) / WHISPER_HOP_LENGTH;
 
         float * cu_padded_samples = nullptr;
-        CUDA_CHECK(cudaMallocAsync(&cu_padded_samples, padded_samples.size() * sizeof(float), m_stream));
+        CUDA_CHECK(cudaMalloc(&cu_padded_samples, padded_samples.size() * sizeof(float)));
         CUDA_CHECK(cudaMemcpyAsync(cu_padded_samples, padded_samples.data(), padded_samples.size() * sizeof(float), cudaMemcpyHostToDevice, m_stream));
 
         float * stft_in = nullptr; // contiguous buffer for stft input
-        CUDA_CHECK(cudaMallocAsync(&stft_in, n_frames * WHISPER_N_FFT * sizeof(float), m_stream));
+        CUDA_CHECK(cudaMalloc(&stft_in, n_frames * WHISPER_N_FFT * sizeof(float)));
 
         fill_stft_input(cu_padded_samples, int(n_frames), m_hann_window, stft_in, m_stream);
 
         cufftComplex* stft_out;
-        CUDA_CHECK(cudaMallocAsync(&stft_out, n_frames * WHISPER_N_FFT_HALF * sizeof(cufftComplex), m_stream));
+        CUDA_CHECK(cudaMalloc(&stft_out, n_frames * WHISPER_N_FFT_HALF * sizeof(cufftComplex)));
 
         cufftHandle plan;
         CUFFT_CHECK(cufftCreate(&plan));
@@ -309,11 +349,11 @@ public:
 
         const auto n_mag_frames = n_frames - 1; // drop last frame
         float * magnitudes;
-        CUDA_CHECK(cudaMallocAsync(&magnitudes, n_mag_frames * WHISPER_N_FFT_HALF * sizeof(float), m_stream));
+        CUDA_CHECK(cudaMalloc(&magnitudes, n_mag_frames * WHISPER_N_FFT_HALF * sizeof(float)));
         calc_magnitudes(stft_out, int(n_mag_frames), magnitudes, m_stream);
 
         float * mel_data = nullptr;
-        CUDA_CHECK(cudaMallocAsync(&mel_data, m_n_mel * n_mag_frames * sizeof(float), m_stream));
+        CUDA_CHECK(cudaMalloc(&mel_data, m_n_mel * n_mag_frames * sizeof(float)));
 
         const float fone = 1.0f, fzero = 0.0f;
         CUBLAS_CHECK(cublasSgemm(m_cublas_handle, CUBLAS_OP_T, CUBLAS_OP_N,
@@ -341,11 +381,11 @@ public:
 
         // cleanup
         CUFFT_CHECK(cufftDestroy(plan));
-        CUDA_CHECK(cudaFreeAsync(mel_data, m_stream));
-        CUDA_CHECK(cudaFreeAsync(magnitudes, m_stream));
-        CUDA_CHECK(cudaFreeAsync(stft_out, m_stream));
-        CUDA_CHECK(cudaFreeAsync(stft_in, m_stream));
-        CUDA_CHECK(cudaFreeAsync(cu_padded_samples, m_stream));
+        CUDA_CHECK(cudaFree(mel_data));
+        CUDA_CHECK(cudaFree(magnitudes));
+        CUDA_CHECK(cudaFree(stft_out));
+        CUDA_CHECK(cudaFree(stft_in));
+        CUDA_CHECK(cudaFree(cu_padded_samples));
 
         return ret;
     }

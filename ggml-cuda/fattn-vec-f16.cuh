@@ -63,7 +63,7 @@ static __global__ void flash_attn_vec_ext_f16(
     static_assert(D % (2*WARP_SIZE) == 0, "D not divisible by 2*WARP_SIZE == 64.");
     constexpr int nwarps = D / WARP_SIZE;
     const int tid = WARP_SIZE*threadIdx.y + threadIdx.x;
-    __builtin_assume(tid < D);
+    GGML_CUDA_ASSUME(tid < D);
 
     __shared__ half KQ[ncols*D];
     half2 * KQ2 = (half2 *) KQ;

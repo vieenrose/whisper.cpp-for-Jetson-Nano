@@ -382,15 +382,15 @@ inline static uint8x16_t ggml_vqtbl1q_u8(uint8x16_t a, uint8x16_t b) {
 
 #define ggml_int16x8x2_t  int16x8x2_t
 #define ggml_uint8x16x2_t uint8x16x2_t
-#define ggml_uint8x16x4_t uint8x16x4_t
+#define ggml_uint8x16x4_t uint8x16x2_t
 #define ggml_int8x16x2_t  int8x16x2_t
-#define ggml_int8x16x4_t  int8x16x4_t
+#define ggml_int8x16x4_t  int8x16x2_t
 
 #define ggml_vld1q_s16_x2 vld1q_s16_x2
 #define ggml_vld1q_u8_x2  vld1q_u8_x2
-#define ggml_vld1q_u8_x4  vld1q_u8_x4
+#define ggml_vld1q_u8_x4  vld1q_u8_x2
 #define ggml_vld1q_s8_x2  vld1q_s8_x2
-#define ggml_vld1q_s8_x4  vld1q_s8_x4
+#define ggml_vld1q_s8_x4  vld1q_s8_x2
 #define ggml_vqtbl1q_s8   vqtbl1q_s8
 #define ggml_vqtbl1q_u8   vqtbl1q_u8
 
